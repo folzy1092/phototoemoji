@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Emoji pack</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #ffffff);
+      --text: var(--tg-theme-text-color, #111111);
+      --hint: var(--tg-theme-hint-color, #8a8a8a);
+      --accent: var(--tg-theme-button-color, #2481cc);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --track: var(--tg-theme-secondary-bg-color, #eef0f3);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 32px 20px; min-height: 100vh;
+      background: var(--bg); color: var(--text);
+      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    .bar { height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
+    .fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+    .count { font-variant-numeric: tabular-nums; font-size: 15px; }
+    .hint { color: var(--hint); font-size: 14px; margin: 0; }
+    .error { color: #e5484d; }
+    button {
+      border: 0; border-radius: 10px; padding: 14px; font: inherit; font-weight: 600;
+      background: var(--accent); color: var(--accent-text); cursor: pointer;
+    }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1 id="title"></h1>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="count" id="count"></div>
+  <p class="hint" id="hint"></p>
+  <button id="action" hidden></button>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    // Same languages as the bot (tgcloud/lib/i18n.js). The endpoint reports the
+    // user's chosen language; until then the Telegram app language is used.
+    const L = {
+      ru: { building: 'Собираю пак…', connecting: 'Подключаюсь…', count: (d, t) => `Загружено ${d} из ${t} эмодзи`,
+        hint: 'Не закрывай окно: за один запрос Telegram Serverless загружает только 20 эмодзи, поэтому пак догружается по шагам.',
+        done: '✅ Пак готов', doneHint: 'Картинка из эмодзи пришла в чат с ботом.', add: 'Добавить пак',
+        failed: 'Не получилось', retry: 'Попробовать снова', openFromBot: 'Открой это окно кнопкой «Догрузить всё» в чате с ботом.',
+        notBuilding: 'Этот пак уже не собирается.', network: 'Ошибка сети' },
+      en: { building: 'Building the pack…', connecting: 'Connecting…', count: (d, t) => `Uploaded ${d} of ${t} emoji`,
+        hint: 'Keep this window open: Telegram Serverless uploads only 20 emoji per request, so the pack is finished in steps.',
+        done: '✅ Pack ready', doneHint: 'The emoji picture is in your chat with the bot.', add: 'Add pack',
+        failed: 'Something went wrong', retry: 'Try again', openFromBot: 'Open this window with the “Upload the rest” button in the chat with the bot.',
+        notBuilding: 'This pack is no longer being built.', network: 'Network error' },
+      ar: { building: 'أُنشئ الحزمة…', connecting: 'جارٍ الاتصال…', count: (d, t) => `تم رفع ${d} من ${t} رمزًا`,
+        hint: 'لا تغلق النافذة: يرفع Telegram Serverless ‏20 رمزًا فقط في كل طلب، لذا تكتمل الحزمة على مراحل.',
+        done: '✅ الحزمة جاهزة', doneHint: 'وصلت الصورة المكوّنة من الرموز إلى محادثتك مع البوت.', add: 'إضافة الحزمة',
+        failed: 'حدث خطأ', retry: 'حاول مرة أخرى', openFromBot: 'افتح هذه النافذة بزر «رفع الباقي» في المحادثة مع البوت.',
+        notBuilding: 'هذه الحزمة لم تعد قيد الإنشاء.', network: 'خطأ في الشبكة' },
+      es: { building: 'Creando el paquete…', connecting: 'Conectando…', count: (d, t) => `Subidos ${d} de ${t} emojis`,
+        hint: 'No cierres la ventana: Telegram Serverless sube solo 20 emojis por petición, así que el paquete se termina por pasos.',
+        done: '✅ Paquete listo', doneHint: 'La imagen de emojis está en tu chat con el bot.', add: 'Añadir paquete',
+        failed: 'Algo salió mal', retry: 'Reintentar', openFromBot: 'Abre esta ventana con el botón «Subir el resto» en el chat con el bot.',
+        notBuilding: 'Este paquete ya no se está creando.', network: 'Error de red' },
+      pt: { building: 'Montando o pacote…', connecting: 'Conectando…', count: (d, t) => `Enviados ${d} de ${t} emojis`,
+        hint: 'Não feche a janela: o Telegram Serverless envia só 20 emojis por requisição, então o pacote termina em etapas.',
+        done: '✅ Pacote pronto', doneHint: 'A imagem de emojis está no seu chat com o bot.', add: 'Adicionar pacote',
+        failed: 'Algo deu errado', retry: 'Tentar de novo', openFromBot: 'Abra esta janela pelo botão «Enviar o resto» no chat com o bot.',
+        notBuilding: 'Este pacote não está mais sendo montado.', network: 'Erro de rede' },
+    };
+    const RU_LIKE = ['ru', 'uk', 'be', 'kk', 'ky', 'uz', 'tg', 'hy', 'az', 'ka', 'tk', 'mo'];
+    function detect(code) {
+      const base = String(code || '').toLowerCase().split(/[-_]/)[0];
+      if (L[base]) return base;
+      return RU_LIKE.includes(base) ? 'ru' : 'en';
+    }
+    const tgUser = tg.initDataUnsafe && tg.initDataUnsafe.user;
+    let lang = detect(tgUser && tgUser.language_code);
+    const T = (key, ...a) => { const v = L[lang][key]; return typeof v === 'function' ? v(...a) : v; };
+
+    const $ = (id) => document.getElementById(id);
+    const jobId = Number(new URLSearchParams(location.search).get('job'));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let state = 'building';
+    let last = null;
+
+    function setLang(next) {
+      if (!next || !L[next]) return;
+      lang = next;
+      document.documentElement.lang = lang;
+      document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+      if (state === 'building') {
+        $('title').textContent = T('building');
+        $('hint').textContent = T('hint');
+        $('count').textContent = last ? T('count', last.done, last.total) : T('connecting');
+      }
+    }
+    setLang(lang);
+
+    function call(name, input) {
+      return new Promise((resolve, reject) => {
+        tg.Serverless.call(name, input, (err, result) => (err ? reject(err) : resolve(result)));
+      });
+    }
+
+    function render(r) {
+      last = r;
+      const pct = r.total ? Math.round((r.done / r.total) * 100) : 0;
+      $('fill').style.width = pct + '%';
+      $('count').textContent = T('count', r.done, r.total);
+    }
+
+    function finished(r) {
+      state = 'done';
+      render(r);
+      $('title').textContent = T('done');
+      $('hint').textContent = T('doneHint');
+      const btn = $('action');
+      btn.textContent = T('add');
+      btn.hidden = false;
+      btn.onclick = () => tg.openTelegramLink(r.link);
+      tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success');
+    }
+
+    function failed(message) {
+      state = 'failed';
+      $('title').textContent = T('failed');
+      $('hint').textContent = message;
+      $('hint').classList.add('error');
+      const btn = $('action');
+      btn.textContent = T('retry');
+      btn.hidden = false;
+      btn.onclick = () => {
+        btn.hidden = true;
+        $('hint').classList.remove('error');
+        state = 'building';
+        setLang(lang);
+        run();
+      };
+    }
+
+    async function run() {
+      if (!Number.isInteger(jobId) || jobId <= 0) return failed(T('openFromBot'));
+      let errors = 0;
+      for (;;) {
+        try {
+          const r = await call('continue_pack', { jobId });
+          setLang(r.lang);
+          errors = 0;
+          if (r.finished) return finished(r);
+          if (r.status !== 'running') return failed(T('notBuilding'));
+          render(r);
+          if (r.busy) await sleep(2000);
+        } catch (e) {
+          if (e && e.parameters && e.parameters.lang) setLang(e.parameters.lang);
+          if (++errors >= 3) return failed((e && e.message) || T('network'));
+          await sleep(1500 * errors);
+        }
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
