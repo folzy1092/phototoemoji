@@ -48,9 +48,26 @@ export const jobs = table('jobs', {
   base:       integer('base').notNull().default(0),
   extra:      integer('extra').notNull().default(0),    // stickers appended to THIS pack later
   usedCredit: integer('used_credit').notNull().default(0),
+  // A link the user chose for a new pack (the part before "_by_<bot>"); null = numbered link.
+  linkName:   text('link_name'),
+  // Bumped by every change of a draft's settings (lib/draft.js): quick button
+  // presses are applied one after another, never over each other.
+  rev:        integer('rev').notNull().default(0),
 }, (t) => ({
   userIdx: index('idx_jobs_user').on(t.userId),
   statusIdx: index('idx_jobs_status').on(t.status),
+}));
+
+// Regular sticker sets made by the bot, per user (a set can't be looked up by
+// owner through the Bot API). The sticker button offers these as destinations.
+export const stickerSets = table('sticker_sets', {
+  id:      integer('id').primaryKey({ autoIncrement: true }),
+  name:    text('name').notNull().unique(),
+  userId:  integer('user_id').notNull(),
+  title:   text('title'),
+  created: integer('created_at').notNull().default(sql`(unixepoch())`),
+}, (t) => ({
+  userIdx: index('idx_sticker_sets_user').on(t.userId),
 }));
 
 // Everyone who wrote to the bot (for /stats and "new user" logs).

@@ -10,7 +10,7 @@
 // invocation, so the perks are limits, not priority.
 //
 // Price: 1 ⭐ costs a buyer about $0.013–0.02 (≈1.3–1.9 ₽), so 99 ⭐ ≈ $1.3–2
-// a month. A big pack is 25 ⭐, so Pro pays off from the 4th big pack.
+// a month. A big pack is 12 ⭐, so Pro pays off from the 9th big pack.
 
 import { db } from 'sdk';
 import { api } from './premium.js'; // premium emoji applied

@@ -10,6 +10,7 @@ import { sql } from 'sdk/db';
 import { MORE } from './i18n_more.js';
 import { PLAN } from './i18n_plan.js';
 import { VIDEO } from './i18n_video.js';
+import { DEST } from './i18n_dest.js';
 
 export const LANGS = ['ru', 'en', 'ar', 'es', 'pt'];
 export const LANG_NAMES = {
@@ -463,7 +464,7 @@ const S = {
 };
 
 for (const lang of LANGS) {
-  Object.assign(S[lang], MORE[lang], PLAN[lang], VIDEO[lang]);
+  Object.assign(S[lang], MORE[lang], PLAN[lang], VIDEO[lang], DEST[lang]);
   const base = S[lang].help;
   S[lang].help = (p) => `${base(p)}\n\n${PLAN[lang].help_pro}`;
 }

@@ -10,9 +10,9 @@
 import { db, InputFile, BotApiError } from 'sdk';
 import { api } from './premium.js'; // premium emoji applied
 import { eq, sql } from 'sdk/db';
-import { jobs } from '../schema.js';
+import { jobs, settings } from '../schema.js';
 import {
-  call, previewMessages, getBotUsername, packTitle, renderJob, tileEmoji, makeSetName, TILE, MAX_TILES,
+  call, previewMessages, getBotUsername, packTitle, renderJob, tileEmoji, makeSetName, setTaken, TILE, MAX_TILES,
 } from './emojipack.js';
 import { loadSource } from './source.js';
 import { sliceTiles } from './image.js';
@@ -61,6 +61,30 @@ const videoSticker = (webm, i, emoji) => ({
   emoji_list: [emoji],
 });
 
+/**
+ * The user's next pack number (1, 2, 3, ...) for its link. A counter in
+ * `settings`, bumped in one statement so two packs started at once never get
+ * the same number. It starts after the packs the user already has.
+ */
+async function nextPackNumber(userId) {
+  const had = await db.get(sql`SELECT COUNT(*) AS n FROM jobs WHERE user_id = ${userId} AND set_name IS NOT NULL AND append_to IS NULL`);
+  const [row] = await db.insert(settings)
+    .values({ key: `pack-seq:${userId}`, value: String(had.n + 1) })
+    .onConflictDoUpdate({ target: settings.key, set: { value: sql`CAST(value AS INTEGER) + 1` } })
+    .returning({ value: settings.value });
+  return Number(row.value);
+}
+
+/** The user's own link if they set one, else the next numbered one that's free. */
+async function freshSetName(job, bot) {
+  if (job.linkName) return `${job.linkName}_by_${bot}`;
+  for (let i = 0; i < 5; i++) {
+    const name = makeSetName(job.userId, await nextPackNumber(job.userId), bot);
+    if (!(await setTaken(name))) return name;
+  }
+  throw new Error('NAME_TAKEN');
+}
+
 async function stickersInSet(name) {
   try {
     return (await api.getStickerSet({ name })).stickers.length;
@@ -75,11 +99,23 @@ async function stickersInSet(name) {
  * `user` is the Telegram User who confirmed (or paid).
  */
 export async function startJob(job, user) {
+  // One start per draft: a double press (or a payment racing a button) must not
+  // build the same set twice.
+  const claim = await db.run(sql`UPDATE jobs SET status = 'running' WHERE id = ${job.id} AND status = 'draft'`);
+  if (!claim.rowsAffected) return;
   const T = await tr(job.userId, user.language_code);
   const bot = await getBotUsername();
   // Extending a pack: upload into its set, after the stickers already there.
   const target = job.appendTo ? await getJob(job.appendTo) : null;
-  const setName = target ? target.setName : makeSetName(job.userId, job.id, bot);
+  let setName;
+  try {
+    setName = target ? target.setName : await freshSetName(job, bot);
+  } catch (e) {
+    // Claimed but nothing built: fail it (and refund) with a message to show it in.
+    const note = await api.sendMessage({ chat_id: job.chatId, text: T('building') });
+    await db.update(jobs).set({ statusMsg: note.message_id }).where(eq(jobs.id, job.id));
+    return stepFailed(job.id, e, user);
+  }
   const base = target ? await stickersInSet(setName) : 0;
   const status = await api.sendMessage({
     chat_id: job.chatId,
@@ -183,7 +219,7 @@ export async function runStep(jobId, user, img = null) {
         await call('createNewStickerSet', {
           user_id: user.id,
           name: job.setName,
-          title: packTitle(user, await getBotUsername(), job.title),
+          title: packTitle(await getBotUsername(), job.title),
           sticker_type: 'custom_emoji',
           stickers: tiles,
         });
@@ -342,10 +378,15 @@ export async function editStatus(job, text, keyboard = null) {
 
 /** Error text for the user (`lang`) or, by default, for Russian log cards. */
 export function describeError(e, lang = 'ru') {
-  if (e instanceof BotApiError) return t(lang, 'err_telegram', e.description);
+  if (e instanceof BotApiError) {
+    if (/SHORTNAME_OCCUPY_FAILED|name is already occupied/i.test(e.description || '')) return t(lang, 'err_link_taken');
+    return t(lang, 'err_telegram', e.description);
+  }
   switch (e && e.message) {
     case 'UNSUPPORTED_FORMAT': return t(lang, 'err_unsupported');
     case 'TOO_LARGE': return t(lang, 'err_too_large');
+    case 'NAME_TAKEN': return t(lang, 'err_link_taken');
+    case 'SET_GONE': return t(lang, 'sk_set_gone');
     case 'FILE_TOO_BIG': return t(lang, 'err_file_big');
     case 'VIDEO_TOO_BIG': return t(lang, 'err_video_big');
     case 'VIDEO_HEAVY': return t(lang, 'err_video_heavy');

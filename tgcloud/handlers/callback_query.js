@@ -2,6 +2,7 @@
 //   lang:<code>         choose the bot language
 //   alb:<group>         build a collage draft from an album
 //   s:<id>:<action>     preview settings (lib/draft.js)
+//   sk:<id>:<choice>    where a sticker goes: a set id, n new, l new with a link, x cancel
 //   next:<id>           upload the next chunk
 //   pm:<id>:<n>         pack menu (from /packs) · pl:<id> back to the list
 //   pr / rb / ap:<id>   rename / rebuild / add a picture to a pack
@@ -18,6 +19,7 @@ import {
   runStep, stepFailed, editStatus, describeError, getJob, packList, packMenu,
   finalButtons, progressButtons, confirmButtons, addLink, FILES_PER_RUN,
 } from '../lib/pack.js';
+import { onStickerChoice } from '../lib/sticker.js';
 import { onDraftButton, createAlbumDraft, rebuildDraft, askTitle, createTextDraft } from '../lib/draft.js';
 import { getBotUsername, HELP_PARAMS, MAX_TILES } from '../lib/emojipack.js';
 import { trackUser, isBanned } from '../lib/users.js';
@@ -43,7 +45,7 @@ export default async function (query) {
     return api.sendMessage({ chat_id: query.message ? query.message.chat.id : query.from.id, text, reply_markup: { inline_keyboard: keyboard } });
   });
 
-  m = /^(s|next|del|delok|undel|pm|pl|pr|rb|ap|md):(\d+)(?::(.+))?$/.exec(data);
+  m = /^(s|sk|next|del|delok|undel|pm|pl|pr|rb|ap|md):(\d+)(?::(.+))?$/.exec(data);
   if (!m) return api.answerCallbackQuery({ callback_query_id: query.id });
   const job = await getJob(+m[2]);
   const T = await tr(query.from.id, query.from.language_code);
@@ -53,6 +55,7 @@ export default async function (query) {
   return guarded(query, () => {
     switch (m[1]) {
       case 's': return onDraftButton(query, job, m[3] || '');
+      case 'sk': return onStickerChoice(query, job, m[3] || '', T);
       case 'next': return next(query, job, T);
       case 'pm': return showMenu(query, job, +m[3] || 1, T);
       case 'pl': return backToList(query);

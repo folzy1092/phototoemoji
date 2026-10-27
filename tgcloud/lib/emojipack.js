@@ -20,7 +20,7 @@ export const OWNER_TAG = 'DEV';
 
 // Telegram Stars: packs up to FREE_TILES emoji are free, bigger ones cost PRICE_STARS.
 export const FREE_TILES = 100;
-export const PRICE_STARS = 25;
+export const PRICE_STARS = 12;
 // Numbers the help text mentions (lib/i18n.js 'help').
 export const HELP_PARAMS = { cols: DEFAULT_COLS, free: FREE_TILES, max: MAX_TILES, price: PRICE_STARS };
 
@@ -101,36 +101,66 @@ export async function loadImage(fileId) {
   return decodeImage(bytes);
 }
 
-// The job id keeps names unique (Date.now() is frozen between I/O calls in the isolate).
-export function makeSetName(userId, jobId, username) {
-  return `px${userId}_${jobId}_by_${username}`;
+/** Link of the user's n-th regular sticker set: "s<userId>_<n>_by_<bot>". */
+export const stickerSetNameN = (userId, n, username) => `s${userId}_${n}_by_${username}`;
+
+/**
+ * A link typed by the user -> { base } (lowercase, the part before "_by_<bot>")
+ * or { error }: 'empty' | 'format' | 'short' | 'long' | 'reserved'.
+ * Accepts a pasted t.me link or the full name with "_by_<bot>" too.
+ * Telegram: English letters, digits and single underscores, starts with a
+ * letter, at most 64 characters including "_by_<bot>".
+ */
+export const LINK_MIN = 3;
+export function parseLink(raw, botUsername) {
+  let s = String(raw || '').trim().toLowerCase();
+  s = s.replace(/^(https?:\/\/)?t\.me\/(addemoji|addstickers)\//, '').replace(/^@/, '');
+  const tail = `_by_${botUsername.toLowerCase()}`;
+  if (s.endsWith(tail)) s = s.slice(0, -tail.length);
+  if (!s) return { error: 'empty' };
+  if (!/^[a-z][a-z0-9]*(_[a-z0-9]+)*$/.test(s)) return { error: 'format' };
+  const max = 64 - tail.length;
+  if (s.length < LINK_MIN) return { error: 'short', max };
+  if (s.length > max) return { error: 'long', max };
+  // Numbered links ("p<id>_<n>", "px<id>_...", "s<id>_...", "st<id>") belong to the bot.
+  if (/^(px?|st?)\d/.test(s)) return { error: 'reserved' };
+  return { base: s, max };
+}
+
+/** Is a sticker/emoji set with this name already there? */
+export async function setTaken(name) {
+  try {
+    await api.getStickerSet({ name });
+    return true;
+  } catch (e) {
+    if (e instanceof BotApiError && e.code === 400) return false;
+    throw e;
+  }
+}
+
+/**
+ * Link name of a user's n-th pack: "p<userId>_<n>_by_<bot>". A set name must
+ * start with a letter, hence the "p". (Packs made before this scheme are
+ * "px<userId>_<jobId>_by_<bot>"; the different prefix keeps the two apart.)
+ */
+export function makeSetName(userId, n, username) {
+  return `p${userId}_${n}_by_${username}`;
 }
 
 const TITLE_MAX = 64;
 
 /**
- * Pack title: "🧩 [custom · ]<author> × @owner · @bot" (the owner's own packs:
- * "🧩 @owner · @bot"). Usernames can be up to
- * 32 chars, so fall back to tighter variants until one fits the 64-char limit.
+ * Pack title: "🧩 [custom · ]@bot". A long custom part is cut to fit the 64-char limit.
  *
  * The title must NOT start with "@": the platform's multipart upload (used
  * whenever a request carries files) hangs until the invocation is killed when
  * a string field begins with "@" (curl-style "@file" semantics). Hence the 🧩.
  */
-export function packTitle(user, botUsername, custom = null) {
-  const owner = `@${OWNER_USERNAME}`;
-  const author = user.id === OWNER_ID ? owner : user.username ? `@${user.username}` : (user.first_name || 'emoji').slice(0, 24);
+export function packTitle(botUsername, custom = null) {
   const bot = `@${botUsername}`;
-  const credits = author === owner
-    ? [`${owner} · ${bot}`, `${owner}·${bot}`, owner]
-    : [`${author} × ${owner} · ${bot}`, `${author}×${owner}·${bot}`, `${author} × ${owner}`, `${author}×${owner}`];
-  const variants = [];
-  for (const c of credits) {
-    if (custom) variants.push(`🧩 ${custom} · ${c}`, `🧩${custom}·${c}`);
-  }
-  for (const c of credits) variants.push(`🧩 ${c}`, `🧩${c}`);
-  if (custom) variants.push(`🧩 ${custom}`);
-  return variants.find((t) => t.length <= TITLE_MAX) || variants[variants.length - 1].slice(0, TITLE_MAX);
+  if (!custom) return `🧩 ${bot}`;
+  const room = TITLE_MAX - `🧩  · ${bot}`.length;
+  return `🧩 ${custom.slice(0, Math.max(0, room)).trim()} · ${bot}`;
 }
 
 // ---- rendering with a job's settings ----

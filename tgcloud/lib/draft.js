@@ -10,13 +10,13 @@ import { eq, sql } from 'sdk/db';
 import { jobs } from '../schema.js';
 import {
   parseCaption, fitGrid, autoRows, renderJob, packTitle, getBotUsername, priceFor,
-  cleanTitle, MAX_TILES, MAX_COLS, FREE_TILES, PRICE_STARS, OWNER_ID,
+  cleanTitle, parseLink, setTaken, LINK_MIN, MAX_TILES, MAX_COLS, FREE_TILES, PRICE_STARS, OWNER_ID,
 } from './emojipack.js';
 import { previewPng, trimmedAxis, removeBackground, telegramViewPng } from './image.js';
 import { parseBanner, bannerGrid, bannerCols, COLORS } from './font.js';
 import { loadSource, MAX_ALBUM } from './source.js';
 import { startJob, getJob, describeError } from './pack.js';
-import { makeSticker } from './sticker.js';
+import { offerStickerTargets, stickerFromLink } from './sticker.js';
 import { videoOf, usableVariants, openClip, previewMp4, firstFrame } from './video.js';
 import { log, logError, esc } from './log.js';
 import { tr } from './i18n.js';
@@ -288,7 +288,10 @@ async function caption_(job, user, T) {
     const crop = job.crop === 'fit' || trimmed ? T(CROP_KEY[trimmed || 'y'][job.crop]) : T('crop_none');
     lines.push(video ? T('video_frame_line', crop) : T('frame_line', crop, T(job.removeBg ? 'bg_removed' : 'bg_kept')));
   }
-  if (!target) lines.push(T('title_line', packTitle(user, await getBotUsername(), job.title)));
+  if (!target) {
+    lines.push(T('title_line', packTitle(await getBotUsername(), job.title)));
+    if (job.linkName) lines.push(T('link_line', `t.me/addemoji/${job.linkName}_by_${await getBotUsername()}`));
+  }
   lines.push(price ? T('price_paid', price, FREE_TILES) : T('price_free'), '', T('adjust_hint'));
   return lines.join('\n');
 }
@@ -314,6 +317,9 @@ async function keyboard(job, T) {
     if (!job.appendTo) extra.push(b(T('btn_title'), 't'));
     if (extra.length) rows.push(extra);
   }
+  const target = await appendTarget(job);
+  const destBtn = b(target ? T('btn_dest_in', destName(target)) : T('btn_dest_new'), 'd');
+  rows.push(target ? [destBtn] : [destBtn, b(job.linkName ? T('btn_link_set', job.linkName) : T('btn_link'), job.linkName ? 'lx' : 'ln')]);
   rows.push([b(T('btn_view'), 'v'), b(T(job.source === 'video' ? 'btn_sticker_video' : 'btn_sticker'), 'st')]);
   const price = await priceForJob(job);
   const credits = price ? await creditsOf(job.userId) : 0;
@@ -321,6 +327,41 @@ async function keyboard(job, T) {
   rows.push([b(T('btn_cancel'), 'x')]);
   return rows;
 }
+
+// ---- where the pack goes: a new one or one of the user's existing packs ----
+
+/** A short name for a pack in buttons: its title, else its link without "_by_<bot>". */
+const destName = (job) => {
+  const n = job.title || String(job.setName || `#${job.id}`).replace(/_by_.*$/, '');
+  return n.length > 22 ? `${n.slice(0, 21)}…` : n;
+};
+
+/** Packs of the user that still have room, newest first. */
+async function packChoices(userId) {
+  const rows = await db.all(sql`SELECT * FROM jobs
+    WHERE user_id = ${userId} AND status = 'done' AND append_to IS NULL AND set_name IS NOT NULL AND cols * rows + extra < ${MAX_TILES}
+    ORDER BY id DESC LIMIT 8`);
+  return rows.map((r) => ({ id: r.id, title: r.title, setName: r.set_name, total: r.cols * r.rows + r.extra }));
+}
+
+async function destKeyboard(job, T) {
+  const b = (text, action) => ({ text, callback_data: `s:${job.id}:${action}` });
+  const rows = (await packChoices(job.userId)).map((p) => [b(`📦 ${destName(p)} · ${p.total}`, `dp${p.id}`)]);
+  rows.unshift([b(`${job.appendTo ? '' : '• '}${T('btn_dest_choose_new')}`, 'dn')]);
+  rows.push([b(T('btn_back'), 'db')]);
+  return rows;
+}
+
+async function setMarkup(job, keyboard) {
+  try {
+    await api.editMessageReplyMarkup({ chat_id: job.chatId, message_id: job.previewMsg, reply_markup: { inline_keyboard: keyboard } });
+  } catch (e) {
+    if (!(e instanceof BotApiError)) throw e;
+  }
+}
+
+// Quick presses edit one message at once; Telegram cancels the older edits.
+const isEditRace = (e) => e instanceof BotApiError && /canceled by new edit message request|message is not modified/i.test(e.description || '');
 
 async function refreshPreview(job, user, T) {
   const media = job.source === 'video'
@@ -348,17 +389,25 @@ async function refreshCaption(job, user, T) {
 }
 
 /** Ask for a title: for a draft (its preview updates) or a finished pack (rename). */
-export async function askTitle(job, user, T) {
-  await db.run(sql`UPDATE jobs SET await_title = (id = ${job.id}) WHERE user_id = ${user.id} AND status IN ('draft', 'done')`);
+export const askTitle = (job, user, T) => askInput(job, user, T, INPUT_TITLE);
+
+// jobs.await_title: what the next text message from the user is for.
+export const INPUT_TITLE = 1;   // a title (draft) or a new title (finished pack)
+export const INPUT_LINK = 2;    // the link of the new emoji pack
+export const INPUT_STICKER_LINK = 3; // the link of a new sticker set (lib/sticker.js)
+
+async function askInput(job, user, T, kind) {
+  await db.run(sql`UPDATE jobs SET await_title = (CASE WHEN id = ${job.id} THEN ${kind} ELSE 0 END) WHERE user_id = ${user.id} AND status IN ('draft', 'done')`);
+  const bot = await getBotUsername();
   return api.sendMessage({
     chat_id: job.chatId,
-    text: T('title_prompt'),
-    reply_markup: { force_reply: true, input_field_placeholder: T('title_placeholder') },
+    text: kind === INPUT_LINK ? T('link_prompt', bot, 64 - 4 - bot.length) : T('title_prompt'),
+    reply_markup: { force_reply: true, input_field_placeholder: T(kind === INPUT_LINK ? 'link_placeholder' : 'title_placeholder') },
   });
 }
 
 /** Button under a preview: `s:<id>:<action>`. */
-export async function onDraftButton(query, job, action) {
+export async function onDraftButton(query, job, action, attempt = 0) {
   const user = query.from;
   const T = await tr(job.userId, user.language_code);
   const answer = (text = undefined, alert = false) =>
@@ -367,8 +416,37 @@ export async function onDraftButton(query, job, action) {
 
   const limit = await tileLimit(job);
   const next = { ...job };
-  switch (action) {
+  const pick = /^dp(\d+)$/.exec(action);
+  if (pick) {
+    const target = await getJob(+pick[1]);
+    const room = target ? MAX_TILES - packTotal(target) : 0;
+    if (!target || target.userId !== job.userId || target.status !== 'done' || target.appendTo || room < 1) return answer(T('dest_gone'), true);
+    next.appendTo = target.id;
+    next.linkName = null;
+    // The new part must fit what's left of the pack.
+    if (next.cols > room) { next.cols = room; next.rows = 1; }
+    else if (next.cols * next.rows > room) next.rows = Math.max(1, Math.floor(room / next.cols));
+  }
+  switch (pick ? 'dp' : action) {
     case 'n': return answer();
+    case 'd': {
+      if (!(await packChoices(job.userId)).length && !job.appendTo) return answer(T('dest_none'), true);
+      await answer();
+      return setMarkup(job, await destKeyboard(job, T));
+    }
+    case 'db':
+      await answer();
+      return setMarkup(job, await keyboard(job, T));
+    case 'dn':
+      if (!job.appendTo) return answer();
+      next.appendTo = null;
+      break;
+    case 'ln':
+      await answer();
+      return askInput(job, user, T, INPUT_LINK);
+    case 'lx':
+      next.linkName = null;
+      break;
     case 'c+': case 'c-': {
       if (job.source === 'text') return answer();
       const cols = Math.min(MAX_COLS, Math.max(1, job.cols + (action === 'c+' ? 1 : -1)));
@@ -405,6 +483,7 @@ export async function onDraftButton(query, job, action) {
     case 't':
       await answer();
       return askTitle(job, user, T);
+    case 'dp': break; // the pack was picked above
     case 'v': {
       await answer();
       const tile = Math.max(12, Math.min(64, Math.floor(700 / Math.max(job.cols, job.rows))));
@@ -417,16 +496,9 @@ export async function onDraftButton(query, job, action) {
         reply_parameters: { message_id: job.previewMsg, allow_sending_without_reply: true },
       });
     }
-    case 'st': {
-      const lim = await checkLimit(user.id, 'sticker');
-      if (!lim.ok) {
-        await answer();
-        return sendLimitHit(job.chatId, 'sticker', lim.limit, T);
-      }
-      await answer(T('sticker_toast'));
-      await countUse(user.id, 'sticker');
-      return makeSticker(job, user, T);
-    }
+    case 'st':
+      await answer();
+      return offerStickerTargets(job, user, T);
     case 'go':
       return confirm(query, job, T);
     case 'x':
@@ -440,32 +512,65 @@ export async function onDraftButton(query, job, action) {
       return answer();
   }
 
-  await db.update(jobs)
-    .set({ cols: next.cols, rows: next.rows, crop: next.crop, removeBg: next.removeBg, color: next.color })
-    .where(eq(jobs.id, job.id));
+  // Apply on top of the revision this press was computed from; if another press
+  // got in first, redo this one on the newer state (so no press is lost).
+  const saved = await db.update(jobs)
+    .set({
+      cols: next.cols, rows: next.rows, crop: next.crop, removeBg: next.removeBg, color: next.color,
+      appendTo: next.appendTo || null, linkName: next.linkName || null, rev: sql`rev + 1`,
+    })
+    .where(sql`id = ${job.id} AND rev = ${job.rev} AND status = 'draft'`)
+    .returning({ id: jobs.id });
+  if (!saved.length) {
+    if (attempt >= 4) return answer(T('updating'));
+    return onDraftButton(query, await getJob(job.id), action, attempt + 1);
+  }
   await answer(T('updating'));
-  await refreshPreview(next, user, T);
+  await syncPreview(job.id, job.rev + 1, user, T);
 }
 
-/** A text message while a draft or pack waits for its title. Returns true if consumed. */
+/**
+ * Show the draft as it is now. A press only renders if no newer press has
+ * been saved (that one renders instead); after rendering, check again, in
+ * case a newer press landed while this picture was on its way.
+ */
+async function syncPreview(jobId, rev, user, T) {
+  const cur = await getJob(jobId);
+  if (!cur || cur.status !== 'draft' || cur.rev !== rev) return;
+  try {
+    await refreshPreview(cur, user, T);
+  } catch (e) {
+    if (isEditRace(e)) return; // a newer edit took over
+    throw e;
+  }
+  if (cur.source === 'video') return; // too heavy to render twice in one invocation
+  const after = await getJob(jobId);
+  if (after.status === 'draft' && after.rev !== rev) {
+    try { await refreshPreview(after, user, T); } catch (e) { if (!isEditRace(e)) throw e; }
+  }
+}
+
+/** A text message while a draft or pack waits for a title or a link. Returns true if consumed. */
 export async function maybeSetTitle(message) {
   const job = await db.select().from(jobs)
-    .where(sql`user_id = ${message.from.id} AND status IN ('draft', 'done') AND await_title = 1`)
+    .where(sql`user_id = ${message.from.id} AND status IN ('draft', 'done') AND await_title IN (1, 2, 3)`)
     .get();
   if (!job) return false;
   const user = message.from;
   const T = await tr(job.userId, user.language_code);
+  if (job.awaitTitle === INPUT_LINK) return setLink(message, job, user, T);
+  if (job.awaitTitle === INPUT_STICKER_LINK) return stickerFromLink(message, job, user, T);
   const title = message.text.trim() === '-' ? null : cleanTitle(message.text);
   await db.update(jobs).set({ title, awaitTitle: 0 }).where(eq(jobs.id, job.id));
 
   if (job.status === 'done') {
-    const full = packTitle(user, await getBotUsername(), title);
+    const full = packTitle(await getBotUsername(), title);
     await api.setStickerSetTitle({ name: job.setName, title: full });
     await api.sendMessage({ chat_id: message.chat.id, text: T('renamed', full) });
     await log('✏️', 'Пак переименован', { user, lines: [`Пак: <code>${job.id}</code>`, `Название: ${esc(full)}`] });
     return true;
   }
-  await refreshCaption({ ...job, title }, user, T);
+  await refreshCaption(await getJob(job.id), user, T);
   await api.sendMessage({
     chat_id: message.chat.id,
     text: title ? T('title_set', title) : T('title_removed'),
@@ -475,11 +580,49 @@ export async function maybeSetTitle(message) {
   return true;
 }
 
+/**
+ * The link for a new emoji pack, typed by the user. A bad or taken one keeps
+ * waiting for another; "-" drops a link that was set.
+ */
+async function setLink(message, job, user, T) {
+  const reply = (text) => api.sendMessage({
+    chat_id: message.chat.id,
+    text,
+    reply_parameters: job.previewMsg ? { message_id: job.previewMsg, allow_sending_without_reply: true } : undefined,
+  });
+  const bot = await getBotUsername();
+  let base = null;
+  if (message.text.trim() !== '-') {
+    const r = parseLink(message.text, bot);
+    if (r.error) {
+      await reply(T(`link_bad_${r.error}`, r.max, LINK_MIN));
+      return true;
+    }
+    if (await setTaken(`${r.base}_by_${bot}`)) {
+      await reply(T('link_taken', r.base));
+      return true;
+    }
+    base = r.base;
+  }
+  await db.update(jobs).set({ linkName: base, awaitTitle: 0, rev: sql`rev + 1` }).where(eq(jobs.id, job.id));
+  await refreshCaption(await getJob(job.id), user, T);
+  await reply(base ? T('link_set', `t.me/addemoji/${base}_by_${bot}`) : T('link_removed'));
+  await log('🔗', 'Ссылка пака', { user, lines: [`Черновик: <code>${job.id}</code>`, `Ссылка: <code>${esc(base || '—')}</code>`] });
+  return true;
+}
+
 // ---- «Создать», gifts and Telegram Stars ----
 
 const payload = (job, price) => `pack:${job.id}:${job.cols}x${job.rows}:${price}`;
 
 async function confirm(query, job, T) {
+  // A chosen link may have been taken since it was checked.
+  const bot = await getBotUsername();
+  if (job.linkName && !job.appendTo && (await setTaken(`${job.linkName}_by_${bot}`))) {
+    await db.update(jobs).set({ linkName: null, rev: sql`rev + 1` }).where(eq(jobs.id, job.id));
+    await api.answerCallbackQuery({ callback_query_id: query.id, text: T('link_taken_now', job.linkName), show_alert: true });
+    return syncPreview(job.id, job.rev + 1, query.from, T);
+  }
   const price = await priceForJob(job);
   if (price && !job.paidStars && !job.usedCredit) {
     // A gift (referrals, /gift) covers it.
